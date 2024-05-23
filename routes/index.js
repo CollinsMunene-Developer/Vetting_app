@@ -1,3 +1,16 @@
+//routes/index.js
+/**
+ * @swagger
+ * /generate-questions:
+ *   get:
+ *     summary: Generate interview questions
+ *     responses:
+ *       200:
+ *         description: A list of generated questions
+ *       500:
+ *         description: Internal server error
+ */
+
 const express = require('express');
 
 module.exports = (openai) => {
@@ -16,7 +29,7 @@ module.exports = (openai) => {
       "What are your career goals?"
     ];
   
-    const numQuestions = 100; // Adjust the number of questions here
+    const numQuestions = 10; // Adjust the number of questions here
     const temperature = 0.5;
     const maxTokens = 100;
     let generatedQuestions = [];

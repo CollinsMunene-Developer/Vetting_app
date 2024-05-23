@@ -1,61 +1,103 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const { OpenAI } = require('openai');
-const {connectToDatabase, getDatabase} = require('./database')
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 
 const openai = new OpenAI(process.env.OPENAI_API_KEY);
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASSWORD,
+  },
+});
 
-const port = 3000;
-const app = express();
-//referencing database
-let db;
+const candidateRouter = express.Router();
 
-//connnecting to the database
-   connectToDatabase()
-   .then(() => {
-    db = getDatabase();
-   })
-   .catch(error => {
-    console.error('Error connecting to MongoDB', error);
-   });
+candidateRouter.use(bodyParser.json());
+candidateRouter.use(bodyParser.urlencoded({ extended: true }));
 
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+let candidateDetails = {}; // Define candidateDetails at the module level
 
-let candidateDetails = {};
+/**
+ * @swagger
+ * /candidate/submitDetails:
+ *   post:
+ *     summary: Submit candidate details
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               fullName:
+ *                 type: string
+ *               idNumber:
+ *                 type: string
+ *               email:
+ *                 type: string
+ *             required:
+ *               - fullName
+ *               - idNumber
+ *               - email
+ *     responses:
+ *       200:
+ *         description: Details received
+ *       400:
+ *         description: Validation error
+ *       500:
+ *         description: Internal server error
+ */
+candidateRouter.post('/submitDetails', async (req, res) => {
+  const { fullName, idNumber, email } = req.body;
 
-app.post('/submitDetails', async (req, res) => {
-  console.log('Received request:', req.body); 
-
-  const { fullName, idNumber } = req.body;
-
-  if (!fullName || !idNumber) {
-    console.error('Validation error: Missing full name or ID number');
-    return res.status(400).json({ First: 'Please provide your full name and ID number.' });
+  if (!fullName || !idNumber || !email) {
+    return res.status(400).json({ error: 'Please provide your full name, ID number, and email.' });
   }
 
-  candidateDetails = { fullName, idNumber };
-
-  try {
-    const collection = db.collection('candidates');
-    await collection.insertOne({ fullName, idNumber });
-  } catch (error) {
-    console.error('Error inserting candidate details into the database:', error);
-    return res.status(500).json({ error: 'Failed to insert candidate details into the database.' });
-  }
+  candidateDetails = { fullName, idNumber, email };
 
   res.json({ message: 'Details received. Now, please provide your language proficiencies.' });
 });
 
-app.post('/submitLanguages', async (req, res) => {
-  console.log('Received request:', req.body); 
-
+/**
+ * @swagger
+ * /candidate/submitLanguages:
+ *   post:
+ *     summary: Submit candidate language proficiencies and generate questions
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               languages:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     name:
+ *                       type: string
+ *                     proficiency:
+ *                       type: number
+ *             required:
+ *               - languages
+ *     responses:
+ *       200:
+ *         description: Questions generated
+ *       400:
+ *         description: Validation error
+ *       500:
+ *         description: Internal server error
+ */
+candidateRouter.post('/submitLanguages', async (req, res) => {
   const { languages } = req.body;
 
   if (!languages || languages.length < 3) {
-    console.error('Validation error: Missing required fields or insufficient languages');
-    return res.status(400).json({ Then: 'Please provide proficiency in at least three languages.' });
+    return res.status(400).json({ error: 'Please provide proficiency in at least three languages.' });
   }
 
   const questions = [];
@@ -68,7 +110,7 @@ app.post('/submitLanguages', async (req, res) => {
 
     try {
       const response = await openai.chat.completions.create({
-        model: 'gpt-3.5-turbo-0125',
+        model: 'gpt-3.5-turbo',
         messages: [
           {
             role: 'user',
@@ -80,8 +122,6 @@ app.post('/submitLanguages', async (req, res) => {
         n: 1,
       });
 
-      console.log('OpenAI API Response:', response);
-
       if (response.choices && response.choices.length > 0) {
         const candidateMessage = response.choices[0].message.content;
 
@@ -89,38 +129,116 @@ app.post('/submitLanguages', async (req, res) => {
           const question = candidateMessage.trim();
           questions.push({ language: name, question });
         } else {
-          console.error('Invalid message content in response:', candidateMessage);
           questions.push({ language: name, question: 'Error generating question' });
         }
       } else {
-        console.error('Invalid response format from OpenAI:', response);
         questions.push({ language: name, question: 'Error generating question' });
       }
 
     } catch (error) {
-      console.error('Error generating question:', error);
       questions.push({ language: name, question: 'Error generating question' });
     }
   }
 
-  try {
-    const collection = db.collection('questions');
-    await collection.insertMany(questions);
-  } catch (error) {
-    console.error('Error inserting generated questions into the database:', error);
-    return res.status(500).json({ error: 'Failed to insert generated questions into the database.' });
+  res.json({ questions });
+});
+
+/**
+ * @swagger
+ * /candidate/submitAnswers:
+ *   post:
+ *     summary: Submit candidate answers and get evaluation report
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               answers:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *             required:
+ *               - answers
+ *     responses:
+ *       200:
+ *         description: Evaluation result
+ *       400:
+ *         description: Validation error
+ *       500:
+ *         description: Internal server error
+ */
+candidateRouter.post('/submitAnswers', async (req, res) => {
+  const { answers } = req.body;
+
+  if (!answers || answers.length === 0) {
+    return res.status(400).json({ error: 'Please provide answers to the generated questions.' });
   }
 
-  console.log('Generated Questions:', questions); 
+  const evaluationResult = await evaluateCandidate(answers);
 
-  res.json({ fullName: candidateDetails.fullName, idNumber: candidateDetails.idNumber, questions });
+  // Send evaluation result via email to employer and candidate
+  sendEvaluationEmail(candidateDetails.email, evaluationResult);
+
+  res.json({ evaluationResult });
 });
 
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ error: 'Something went wrong!' });
-});
+async function evaluateCandidate(candidateAnswers) {
+  const evaluationResult = [];
 
-app.listen(port, () => {
-  console.log(`Server is listening at http://localhost:${port}`);
-});
+  for (const answer of candidateAnswers) {
+    try {
+      // Send candidate answer to OpenAI for evaluation
+      const response = await openai.chat.completions.create({
+        model: 'gpt-3.5-turbo',
+        messages: [
+          {
+            role: 'user',
+            content: `Evaluate the following answer and determine if it is relevant: ${answer}`
+          }
+        ],
+        max_tokens: 100,
+        temperature: 0.5,
+        n: 1,
+      });
+
+      const isRelevant = response.choices && response.choices.length > 0 && response.choices[0].message.content.includes('relevant');
+      evaluationResult.push({ answer, isRelevant });
+    } catch (error) {
+      console.error('Error evaluating candidate answer:', error);
+      evaluationResult.push({ answer, isRelevant: false });
+    }
+  }
+
+  return evaluationResult;
+}
+
+
+function sendEvaluationEmail(email, evaluationResult) {
+  const message = {
+    from: process.env.EMAIL_USER,
+    to: email,
+    subject: 'Evaluation Report',
+    text: 'Here is the evaluation report for your language proficiencies:',
+    html: generateEvaluationHTML(evaluationResult),
+  };
+
+  transporter.sendMail(message, (error, info) => {
+    if (error) {
+      console.error('Error sending evaluation email:', error);
+    } else {
+      console.log('Evaluation email sent:', info.response);
+    }
+  });
+}
+
+function generateEvaluationHTML(evaluationResult) {
+  let html = '<ul>';
+  evaluationResult.forEach((result, index) => {
+    html += `<li>Answer ${index + 1}: ${result.answer} - ${result.isRelevant ? 'Relevant' : 'Not Relevant'}</li>`;
+  });
+  html += '</ul>';
+  return html;
+}
+module.exports = candidateRouter;
