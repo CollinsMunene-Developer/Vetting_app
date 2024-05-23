@@ -1,0 +1,7 @@
+{
+    "name": "Vetting_App",
+    "dockerComposeFile": ["docker-compose.yml"],
+    "service": "app",
+    "workspaceFolder": "/app"
+  }
+  

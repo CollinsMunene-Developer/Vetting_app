@@ -1,20 +1,20 @@
-FROM node:14
-#work directory
-WORKDIR /usr/src/app
+# Use the official Node.js image as the base image
+FROM node:latest
 
-#copying json files
+# Set the working directory in the container
+WORKDIR /app
+
+# Copy package.json and package-lock.json to the working directory
 COPY package*.json ./
 
-#installing Dependecies into the project
+# Install dependencies
 RUN npm install
 
-#Copying te rest of  the application code
+# Copy the rest of the application code to the working directory
 COPY . .
 
-#exposing the port where the app runs
+# Expose the port your app runs on
 EXPOSE 3000
 
-# command to run application
-CMD [ "node","server.js", "candidate.js" ]
-
-
+# Command to run your application
+CMD ["npm", "run", "dev"]

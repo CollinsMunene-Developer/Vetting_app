@@ -12,6 +12,7 @@
  */
 
 const express = require('express');
+const { Question, Answer } = require('../models'); // Corrected the import
 
 module.exports = (openai) => {
   const router = express.Router();
@@ -72,16 +73,14 @@ module.exports = (openai) => {
 
   router.post('/submit-answers', async (req, res) => {
     try {
-      const { candidateId, answers } = req.body;
-      // Save the candidate's answers to the database
-      // await Candidate.create({ candidateId, answers });
+      const { answer } = req.body;
+      await Answer.create({ answer }); // Corrected the variable name
       res.status(200).json({ message: 'Answers submitted successfully' });
     } catch (error) {
       console.error("Error submitting answers:", error);
       res.status(500).json({ error: 'Internal server error' });
     }
-  });
-
+  }); 
   return router;
 };
 

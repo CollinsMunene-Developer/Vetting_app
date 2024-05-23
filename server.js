@@ -4,6 +4,8 @@ const swaggerUi = require('swagger-ui-express');
 const swaggerJsdoc = require('swagger-jsdoc');
 require('dotenv').config();
 const { OpenAI } = require('openai');
+const mongoose = require('mongoose');
+const { Question, Answer } = require('./models');
 
 // Initialize OpenAI
 const openai = new OpenAI(process.env.OPENAI_API_KEY);
@@ -36,6 +38,13 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
 // Require routes
 const indexRoutes = require('./routes/index')(openai);
 const candidateRoutes = require('./routes/candidate');
+
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+  .then(() => console.log('MongoDb Connected'))
+  .catch(err => console.log('MongoDB Connection Error', err));
 
 // Use routes
 app.use('/', indexRoutes);

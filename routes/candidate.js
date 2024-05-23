@@ -2,6 +2,9 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const { OpenAI } = require('openai');
 const nodemailer = require('nodemailer');
+const mongoose = require('mongoose');
+const { Candidate } = require('../models');
+const {sendEvaluationEmail} = require('../routes/nodemailer')
 require('dotenv').config();
 
 const openai = new OpenAI(process.env.OPENAI_API_KEY);
@@ -13,12 +16,15 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+});
+
 const candidateRouter = express.Router();
 
 candidateRouter.use(bodyParser.json());
 candidateRouter.use(bodyParser.urlencoded({ extended: true }));
-
-let candidateDetails = {}; // Define candidateDetails at the module level
 
 /**
  * @swagger
@@ -57,9 +63,14 @@ candidateRouter.post('/submitDetails', async (req, res) => {
     return res.status(400).json({ error: 'Please provide your full name, ID number, and email.' });
   }
 
-  candidateDetails = { fullName, idNumber, email };
+  try {
+    const candidate = new Candidate({ fullName, idNumber, email });
+    await candidate.save();
 
-  res.json({ message: 'Details received. Now, please provide your language proficiencies.' });
+    res.json({ message: 'Details received. Now, please provide your language proficiencies.', candidateId: candidate._id });
+  } catch (error) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 /**
@@ -74,6 +85,8 @@ candidateRouter.post('/submitDetails', async (req, res) => {
  *           schema:
  *             type: object
  *             properties:
+ *               candidateId:
+ *                 type: string
  *               languages:
  *                 type: array
  *                 items:
@@ -84,6 +97,7 @@ candidateRouter.post('/submitDetails', async (req, res) => {
  *                     proficiency:
  *                       type: number
  *             required:
+ *               - candidateId
  *               - languages
  *     responses:
  *       200:
@@ -94,53 +108,64 @@ candidateRouter.post('/submitDetails', async (req, res) => {
  *         description: Internal server error
  */
 candidateRouter.post('/submitLanguages', async (req, res) => {
-  const { languages } = req.body;
+  const { candidateId, languages } = req.body;
 
   if (!languages || languages.length < 3) {
     return res.status(400).json({ error: 'Please provide proficiency in at least three languages.' });
   }
 
-  const questions = [];
-  for (const language of languages) {
-    const { name, proficiency } = language;
-    let knowledgeLevel = '';
-    if (proficiency >= 8) knowledgeLevel = 'expert';
-    else if (proficiency >= 6) knowledgeLevel = 'advanced';
-    else knowledgeLevel = 'intermediate';
+  try {
+    const candidate = await Candidate.findById(candidateId);
+    if (!candidate) {
+      return res.status(404).json({ error: 'Candidate not found.' });
+    }
 
-    try {
-      const response = await openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'user',
-            content: `I am proficient in ${name} programming language at a level of ${proficiency}. Could you ask me some questions to test my ${knowledgeLevel} knowledge?`
+    const questions = [];
+    for (const language of languages) {
+      const { name, proficiency } = language;
+      let knowledgeLevel = '';
+      if (proficiency >= 8) knowledgeLevel = 'expert';
+      else if (proficiency >= 6) knowledgeLevel = 'advanced';
+      else knowledgeLevel = 'intermediate';
+
+      try {
+        const response = await openai.chat.completions.create({
+          model: 'gpt-3.5-turbo',
+          messages: [
+            {
+              role: 'user',
+              content: `I am proficient in ${name} programming language at a level of ${proficiency}. Could you ask me some questions to test my ${knowledgeLevel} knowledge?`
+            }
+          ],
+          max_tokens: 100,
+          temperature: 0.5,
+          n: 1,
+        });
+
+        if (response.choices && response.choices.length > 0) {
+          const candidateMessage = response.choices[0].message.content;
+
+          if (candidateMessage && typeof candidateMessage === 'string') {
+            const question = candidateMessage.trim();
+            questions.push({ language: name, question });
+            candidate.questions.push({ language: name, question });
+          } else {
+            questions.push({ language: name, question: 'Error generating question' });
           }
-        ],
-        max_tokens: 100,
-        temperature: 0.5,
-        n: 1,
-      });
-
-      if (response.choices && response.choices.length > 0) {
-        const candidateMessage = response.choices[0].message.content;
-
-        if (candidateMessage && typeof candidateMessage === 'string') {
-          const question = candidateMessage.trim();
-          questions.push({ language: name, question });
         } else {
           questions.push({ language: name, question: 'Error generating question' });
         }
-      } else {
+
+      } catch (error) {
         questions.push({ language: name, question: 'Error generating question' });
       }
-
-    } catch (error) {
-      questions.push({ language: name, question: 'Error generating question' });
     }
-  }
 
-  res.json({ questions });
+    await candidate.save();
+    res.json({ questions });
+  } catch (error) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 /**
@@ -155,47 +180,76 @@ candidateRouter.post('/submitLanguages', async (req, res) => {
  *           schema:
  *             type: object
  *             properties:
+ *               candidateId:
+ *                 type: string
  *               answers:
  *                 type: array
  *                 items:
- *                   type: string
+ *                   type: object
+ *                   properties:
+ *                     language:
+ *                       type: string
+ *                     answer:
+ *                       type: string
  *             required:
+ *               - candidateId
  *               - answers
  *     responses:
  *       200:
  *         description: Evaluation result
  *       400:
  *         description: Validation error
+ *       404:
+ *         description: Candidate not found
  *       500:
  *         description: Internal server error
  */
+
+
 candidateRouter.post('/submitAnswers', async (req, res) => {
-  const { answers } = req.body;
+  const { candidateId, answers } = req.body;
 
   if (!answers || answers.length === 0) {
     return res.status(400).json({ error: 'Please provide answers to the generated questions.' });
   }
 
-  const evaluationResult = await evaluateCandidate(answers);
+  try {
+    const candidate = await Candidate.findById(candidateId);
+    if (!candidate) {
+      return res.status(404).json({ error: 'Candidate not found.' });
+    }
 
-  // Send evaluation result via email to employer and candidate
-  sendEvaluationEmail(candidateDetails.email, evaluationResult);
+    const evaluationResult = await evaluateCandidate(answers);
 
-  res.json({ evaluationResult });
+    // Calculate the score
+    const correctAnswers = evaluationResult.filter(result => result.isRelevant).length;
+    const totalQuestions = evaluationResult.length;
+    const hasPassed = correctAnswers > totalQuestions / 2;
+
+    candidate.answers = evaluationResult;
+    await candidate.save();
+
+    // Send evaluation email
+    sendEvaluationEmail(candidate.email, evaluationResult, hasPassed);
+
+    res.json({ evaluationResult, hasPassed });
+  } catch (error) {
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
+
 
 async function evaluateCandidate(candidateAnswers) {
   const evaluationResult = [];
 
   for (const answer of candidateAnswers) {
     try {
-      // Send candidate answer to OpenAI for evaluation
       const response = await openai.chat.completions.create({
         model: 'gpt-3.5-turbo',
         messages: [
           {
             role: 'user',
-            content: `Evaluate the following answer and determine if it is relevant: ${answer}`
+            content: `Evaluate the following answer and determine if it is relevant: ${answer.answer}`
           }
         ],
         max_tokens: 100,
@@ -204,10 +258,10 @@ async function evaluateCandidate(candidateAnswers) {
       });
 
       const isRelevant = response.choices && response.choices.length > 0 && response.choices[0].message.content.includes('relevant');
-      evaluationResult.push({ answer, isRelevant });
+      evaluationResult.push({ language: answer.language, answer: answer.answer, isRelevant });
     } catch (error) {
       console.error('Error evaluating candidate answer:', error);
-      evaluationResult.push({ answer, isRelevant: false });
+      evaluationResult.push({ language: answer.language, answer: answer.answer, isRelevant: false });
     }
   }
 
@@ -215,30 +269,6 @@ async function evaluateCandidate(candidateAnswers) {
 }
 
 
-function sendEvaluationEmail(email, evaluationResult) {
-  const message = {
-    from: process.env.EMAIL_USER,
-    to: email,
-    subject: 'Evaluation Report',
-    text: 'Here is the evaluation report for your language proficiencies:',
-    html: generateEvaluationHTML(evaluationResult),
-  };
 
-  transporter.sendMail(message, (error, info) => {
-    if (error) {
-      console.error('Error sending evaluation email:', error);
-    } else {
-      console.log('Evaluation email sent:', info.response);
-    }
-  });
-}
 
-function generateEvaluationHTML(evaluationResult) {
-  let html = '<ul>';
-  evaluationResult.forEach((result, index) => {
-    html += `<li>Answer ${index + 1}: ${result.answer} - ${result.isRelevant ? 'Relevant' : 'Not Relevant'}</li>`;
-  });
-  html += '</ul>';
-  return html;
-}
 module.exports = candidateRouter;
